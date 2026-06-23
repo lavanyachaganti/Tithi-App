@@ -18,6 +18,12 @@ function formatDisplayDate(value) {
   return `${day}-${month}-${year}`;
 }
 
+function getLanguageCode(language) {
+  if (language === "Tamil") return "ta";
+  if (language === "Telugu") return "te";
+  return "en";
+}
+
 function getTithiTimeLabel(type, language = "English") {
   const labelMap = {
     Telugu: {
@@ -98,6 +104,9 @@ function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showPasswordConfirm, setShowPasswordConfirm] = useState(false);
   const [token, setToken] = useState(() => {
     try {
       const stored = JSON.parse(localStorage.getItem("tithi-user"));
@@ -106,6 +115,13 @@ function App() {
       return null;
     }
   });
+
+  const apiBaseUrl = import.meta.env.VITE_API_BASE || (window.location.protocol === "file:" || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" ? "http://127.0.0.1:5000" : "");
+
+  const buildApiUrl = (endpoint) => {
+    const normalized = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+    return apiBaseUrl ? `${apiBaseUrl}${normalized}` : normalized;
+  };
   const [user, setUser] = useState(() => {
     try {
       const stored = JSON.parse(localStorage.getItem("tithi-user"));
@@ -113,6 +129,8 @@ function App() {
         name: stored.name,
         email: stored.email,
         role: stored.role || "user",
+        createdAt: stored.createdAt || null,
+        lastLogin: stored.lastLogin || null,
       } : null;
     } catch {
       return null;
@@ -124,8 +142,10 @@ function App() {
   });
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showProfileView, setShowProfileView] = useState(false);
-  const [profileViewMode, setProfileViewMode] = useState("view"); // "view", "manage" or "update"
-  const [passwordChangeMode, setPasswordChangeMode] = useState(false);
+  const [profileViewMode, setProfileViewMode] = useState("view");
+  const [profileForm, setProfileForm] = useState({ name: "" });
+  const [profileSaveMessage, setProfileSaveMessage] = useState({ type: "", text: "" });
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [passwordChangeLoading, setPasswordChangeLoading] = useState(false);
   const [passwordChangeMessage, setPasswordChangeMessage] = useState({ type: "", text: "" });
@@ -147,6 +167,268 @@ function App() {
   const [varjyamNotificationError, setVarjyamNotificationError] = useState("");
   const [varjyamNotificationLoading, setVarjyamNotificationLoading] = useState(false);
   const [showVarjyamModal, setShowVarjyamModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState({ type: "", text: "" });
+  const [clearNotificationsLoading, setClearNotificationsLoading] = useState(false);
+  const [logoutAllLoading, setLogoutAllLoading] = useState(false);
+  const [deleteAccountLoading, setDeleteAccountLoading] = useState(false);
+  const [showDeleteAccountModal, setShowDeleteAccountModal] = useState(false);
+  const [deleteAccountPassword, setDeleteAccountPassword] = useState("");
+  const [showDeletePassword, setShowDeletePassword] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState("");
+  const [locationCoords, setLocationCoords] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("tithi-location"));
+      if (stored && typeof stored.lat === "number" && typeof stored.lng === "number") {
+        return stored;
+      }
+    } catch {
+      // ignore invalid storage
+    }
+    return null;
+  });
+  const [locationPermission, setLocationPermission] = useState(() => {
+    try {
+      return localStorage.getItem("tithi-location-permission") || "unknown";
+    } catch {
+      return "unknown";
+    }
+  });
+  const [locationPromptStatus, setLocationPromptStatus] = useState(() => {
+    try {
+      const stored = localStorage.getItem("tithi-location-setup");
+      if (stored) return stored;
+      const storedCoords = JSON.parse(localStorage.getItem("tithi-location"));
+      if (storedCoords && typeof storedCoords.lat === "number" && typeof storedCoords.lng === "number") {
+        return "responded";
+      }
+      const storedPermission = localStorage.getItem("tithi-location-permission");
+      if (storedPermission && storedPermission !== "unknown") {
+        return "responded";
+      }
+    } catch {
+      // ignore invalid storage
+    }
+    return "unknown";
+  });
+  const [showLocationPrompt, setShowLocationPrompt] = useState(false);
+  const [locationRequesting, setLocationRequesting] = useState(false);
+
+  const updateLocationPromptStatus = useCallback((status) => {
+    setLocationPromptStatus(status);
+    try {
+      localStorage.setItem("tithi-location-setup", status);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const storeLocationPermission = useCallback((status) => {
+    setLocationPermission(status);
+    try {
+      localStorage.setItem("tithi-location-permission", status);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const storeLocationCoords = useCallback((coords) => {
+    setLocationCoords(coords);
+    try {
+      localStorage.setItem("tithi-location", JSON.stringify(coords));
+    } catch {
+      // ignore storage errors
+    }
+    storeLocationPermission("granted");
+  }, [storeLocationPermission]);
+
+  const [locationLabel, setLocationLabel] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("tithi-location-meta"));
+      return typeof stored?.label === "string" ? stored.label : "";
+    } catch {
+      return "";
+    }
+  });
+
+  const markLocationUnavailable = useCallback((status) => {
+    setLocationCoords(null);
+    setLocationLabel("");
+    storeLocationPermission(status || "unavailable");
+  }, [storeLocationPermission]);
+
+  const requestLocationAccess = useCallback((force = false) => {
+    if (!navigator?.geolocation) {
+      markLocationUnavailable("unsupported");
+      return;
+    }
+
+    if (locationPermission !== "unknown" && !force) {
+      return;
+    }
+
+    setLocationRequesting(true);
+    updateLocationPromptStatus("responded");
+
+    let settled = false;
+    const onFinish = (status, coords = null) => {
+      if (settled) return;
+      settled = true;
+      setLocationRequesting(false);
+      if (coords) {
+        storeLocationCoords(coords);
+      } else {
+        markLocationUnavailable(status);
+      }
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      onFinish("unavailable");
+    }, 10000);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        clearTimeout(timeoutId);
+        const { latitude, longitude } = position.coords;
+        onFinish("granted", {
+          lat: Number(latitude.toFixed(6)),
+          lng: Number(longitude.toFixed(6)),
+        });
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        if (error?.code === 1) {
+          onFinish("denied");
+        } else {
+          onFinish("unavailable");
+        }
+      },
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 900000 }
+    );
+  }, [locationPermission, markLocationUnavailable, storeLocationCoords, updateLocationPromptStatus]);
+
+  const handleDisableLocation = useCallback(() => {
+    setLocationCoords(null);
+    setLocationLabel("");
+    setLocationPermission("unknown");
+    try {
+      localStorage.removeItem("tithi-location");
+      localStorage.removeItem("tithi-location-permission");
+      localStorage.removeItem("tithi-location-meta");
+    } catch {
+      // ignore storage errors
+    }
+    setSettingsMessage({ type: "success", text: "Location disabled." });
+  }, []);
+
+  const handleAllowLocationSetup = useCallback(() => {
+    updateLocationPromptStatus("responded");
+    setShowLocationPrompt(false);
+    requestLocationAccess(true);
+  }, [requestLocationAccess, updateLocationPromptStatus]);
+
+  const handleSkipLocationSetup = useCallback(() => {
+    updateLocationPromptStatus("responded");
+    setShowLocationPrompt(false);
+  }, [updateLocationPromptStatus]);
+
+  const handleEnableLocation = useCallback(() => {
+    updateLocationPromptStatus("responded");
+    requestLocationAccess(true);
+  }, [requestLocationAccess, updateLocationPromptStatus]);
+
+  const handleUpdateLocation = useCallback(() => {
+    requestLocationAccess(true);
+  }, [requestLocationAccess]);
+
+  useEffect(() => {
+    if (!locationCoords) {
+      return;
+    }
+
+    let isActive = true;
+    const stored = localStorage.getItem("tithi-location-meta");
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (
+          parsed &&
+          parsed.lat === locationCoords.lat &&
+          parsed.lng === locationCoords.lng &&
+          typeof parsed.label === "string" &&
+          parsed.lang === language
+        ) {
+          setLocationLabel(parsed.label);
+          return;
+        }
+      } catch {
+        // invalid metadata, ignore
+      }
+    }
+
+    const controller = new AbortController();
+    const fetchLocationName = async () => {
+      try {
+        const langCode = getLanguageCode(language);
+        const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+          locationCoords.lat
+        )}&lon=${encodeURIComponent(locationCoords.lng)}&zoom=10&addressdetails=1&accept-language=${encodeURIComponent(
+          langCode
+        )}`;
+        const response = await fetch(url, {
+          signal: controller.signal,
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) {
+          throw new Error("Reverse geocode failed");
+        }
+        const data = await response.json();
+        if (!isActive) return;
+
+        const address = data?.address;
+        let label = "Current Location";
+        if (address) {
+          const place = address.city || address.town || address.village || address.hamlet || address.county;
+          const region = address.state || address.region || address.state_district;
+          if (place && region) {
+            label = `${place}, ${region}`;
+          } else if (place) {
+            label = `${place}${address.country ? `, ${address.country}` : ""}`;
+          } else if (region) {
+            label = region;
+          } else if (address.country) {
+            label = address.country;
+          }
+        }
+
+        setLocationLabel(label);
+        try {
+          localStorage.setItem(
+            "tithi-location-meta",
+            JSON.stringify({ lat: locationCoords.lat, lng: locationCoords.lng, label, lang: language })
+          );
+        } catch {
+          // ignore storage errors
+        }
+      } catch (error) {
+        if (!isActive) return;
+        console.debug("Reverse geocode failed:", error);
+        setLocationLabel("Current Location");
+      }
+    };
+
+    fetchLocationName();
+    return () => {
+      isActive = false;
+      controller.abort();
+    };
+  }, [locationCoords, language]);
+
+  useEffect(() => {
+    if (user && locationPromptStatus === "unknown") {
+      setShowLocationPrompt(true);
+    }
+  }, [user, locationPromptStatus]);
 
   const navigate = useCallback((path) => {
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
@@ -155,6 +437,8 @@ function App() {
     }
     setRoute(normalizedPath);
   }, []);
+
+  const displayLocation = locationCoords ? (locationLabel || "Current Location") : "";
 
   const isAdmin = user?.role === "admin";
   const isAdminPortal = route.startsWith("/admin");
@@ -183,14 +467,63 @@ function App() {
 
   const toggleShowPassword = () => setShowPassword((v) => !v);
   const toggleShowConfirmPassword = () => setShowConfirmPassword((v) => !v);
+  const toggleShowCurrentPassword = () => setShowCurrentPassword((v) => !v);
+  const toggleShowNewPassword = () => setShowNewPassword((v) => !v);
+  const toggleShowPasswordConfirm = () => setShowPasswordConfirm((v) => !v);
+  const toggleShowDeletePassword = () => setShowDeletePassword((v) => !v);
+
+  const resetPasswordVisibility = () => {
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+    setShowCurrentPassword(false);
+    setShowNewPassword(false);
+    setShowPasswordConfirm(false);
+    setShowDeletePassword(false);
+  };
+
+  const isPasswordValid = (value) => {
+    if (typeof value !== "string") return false;
+    return /^[A-Za-z0-9@#$%^&*()!?_\-+=\[\]{};:'",.<>\/\\|~]{6,30}$/.test(value);
+  };
+
+  const getPasswordValidationError = (value) => {
+    if (typeof value !== "string") return "Password must be 6 to 30 characters long and may include letters, numbers, and special characters.";
+    if (value.length < 6 || value.length > 30) {
+      return "Password must be 6 to 30 characters long and may include letters, numbers, and special characters.";
+    }
+    if (!/^[A-Za-z0-9@#$%^&*()!?_\-+=\[\]{};:'",.<>\/\\|~]*$/.test(value)) {
+      return "Password must be 6 to 30 characters long and may include letters, numbers, and special characters.";
+    }
+    return "";
+  };
+
+  const isEmailValid = (value) => {
+    if (typeof value !== "string") return false;
+    const trimmed = value.trim();
+    return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(trimmed);
+  };
+
+  const getEmailValidationError = (value) => {
+    if (!isEmailValid(value)) {
+      return "Please enter a valid email address.";
+    }
+    return "";
+  };
 
   const fetchTithi = useCallback(async () => {
     if (!date || !time) return;
     setLoading(true);
 
+    const params = new URLSearchParams({ lang: language, date, time });
+    if (locationCoords?.lat != null && locationCoords?.lng != null) {
+      params.append("lat", String(locationCoords.lat));
+      params.append("lng", String(locationCoords.lng));
+    }
+    const requestUrl = `/api/tithi?${params.toString()}`;
+    console.debug("fetchTithi start", { selectedDate: date, selectedTime: time, requestUrl, locationCoords });
+
     try {
-      const params = new URLSearchParams({ lang: language, date, time });
-      const response = await fetch(`/api/tithi?${params.toString()}`);
+      const response = await fetch(requestUrl);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -200,6 +533,7 @@ function App() {
       }
 
       const data = await response.json();
+      console.debug("fetchTithi response", { selectedDate: date, selectedTime: time, data });
       setTithi(data.tithi || "Tithi not available");
       setTithiStartTime(data.startTime || "");
       setTithiEndTime(data.endTime || "");
@@ -212,7 +546,7 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }, [date, language, time]);
+  }, [date, language, time, locationCoords]);
 
   const fetchNotifications = useCallback(async () => {
     if (!token) return;
@@ -294,6 +628,8 @@ function App() {
           name: data.user.name,
           email: data.user.email,
           role: data.user.role || "user",
+          createdAt: data.user.createdAt || null,
+          lastLogin: data.user.lastLogin || null,
         };
         setUser(restoredUser);
         localStorage.setItem("tithi-user", JSON.stringify({ ...restoredUser, token }));
@@ -317,9 +653,16 @@ function App() {
     setVarjyamNotificationLoading(true);
     setVarjyamNotificationError("");
 
+    let requestUrl = `/api/varjyam/notification?date=${encodeURIComponent(date)}&time=${encodeURIComponent(time)}`;
+    if (locationCoords?.lat != null && locationCoords?.lng != null) {
+      requestUrl += `&lat=${encodeURIComponent(locationCoords.lat)}&lng=${encodeURIComponent(locationCoords.lng)}`;
+    }
+    console.debug("fetchVarjyamNotification start", { selectedDate: date, selectedTime: time, requestUrl, locationCoords });
+
     try {
-      const response = await fetch(`/api/varjyam/notification?date=${encodeURIComponent(date)}`);
+      const response = await fetch(requestUrl);
       const data = await response.json();
+      console.debug("fetchVarjyamNotification response", { selectedDate: date, selectedTime: time, data });
 
       if (!response.ok) {
         console.error("Varjyam fetch error:", response.status, data.error);
@@ -330,9 +673,11 @@ function App() {
 
       if (Array.isArray(data.varjyam) && data.varjyam.length > 0) {
         setVarjyamDetails(data.varjyam);
+        console.debug("fetchVarjyamNotification setVarjyamDetails", { newDetails: data.varjyam });
         setVarjyamNotificationError("");
       } else {
         setVarjyamDetails([]);
+        console.debug("fetchVarjyamNotification cleared varjyamDetails", { needsRefresh: data.needsRefresh, data });
         if (data.needsRefresh) {
           setVarjyamNotificationError("Varjyam data not cached. Click refresh button.");
         }
@@ -344,7 +689,7 @@ function App() {
     } finally {
       setVarjyamNotificationLoading(false);
     }
-  }, [date, time]);
+  }, [date, time, locationCoords]);
 
   useEffect(() => {
     if (skipAutoFetch) return;
@@ -365,14 +710,21 @@ function App() {
     if (skipAutoFetch) return;
 
     setRefreshing(true);
+    console.debug("handleRefresh start", { selectedDate: date, selectedTime: time });
+
     try {
-      const postResp = await fetch(`/api/panchang/refresh?date=${encodeURIComponent(date)}&time=${encodeURIComponent(time)}`, { method: "POST" });
+      let refreshUrl = `/api/panchang/refresh?date=${encodeURIComponent(date)}&time=${encodeURIComponent(time)}`;
+      if (locationCoords?.lat != null && locationCoords?.lng != null) {
+        refreshUrl += `&lat=${encodeURIComponent(locationCoords.lat)}&lng=${encodeURIComponent(locationCoords.lng)}`;
+      }
+      const postResp = await fetch(refreshUrl, { method: "POST" });
       let postData = {};
       try {
         postData = await postResp.json();
       } catch (e) {
         // ignore parse errors
       }
+      console.debug("handleRefresh response", { selectedDate: date, selectedTime: time, postData, status: postResp.status });
 
       if (!postResp.ok) {
         console.error("Refresh request failed:", postResp.status, postData.error);
@@ -387,7 +739,12 @@ function App() {
         setTithi(t);
       }
 
-      setVarjyamDetails(Array.isArray(postData.varjyam) ? postData.varjyam : []);
+      if (Array.isArray(postData.varjyam) && postData.varjyam.length > 0) {
+        setVarjyamDetails(postData.varjyam);
+        console.debug("handleRefresh setVarjyamDetails", { newDetails: postData.varjyam });
+      } else {
+        setVarjyamDetails(Array.isArray(postData.varjyam) ? postData.varjyam : []);
+      }
       setVarjyamNotificationError("");
 
       try {
@@ -396,10 +753,14 @@ function App() {
         console.error("fetchTithi after refresh failed:", e?.message || e);
       }
 
-      try {
-        await fetchVarjyamNotification();
-      } catch (e) {
-        console.error("fetchVarjyamNotification after refresh failed:", e?.message || e);
+      if (!Array.isArray(postData.varjyam) || postData.varjyam.length === 0) {
+        try {
+          await fetchVarjyamNotification();
+        } catch (e) {
+          console.error("fetchVarjyamNotification after refresh failed:", e?.message || e);
+        }
+      } else {
+        console.debug("Skipping fetchVarjyamNotification because refresh returned valid varjyam");
       }
     } catch (error) {
       console.error("Refresh flow error:", error?.message || error);
@@ -410,6 +771,7 @@ function App() {
   };
 
   const openAuthModal = (mode) => {
+    resetPasswordVisibility();
     setAuthMode(mode);
     setAuthForm({ name: "", email: "", password: "", confirmPassword: "" });
     setAuthError("");
@@ -420,6 +782,7 @@ function App() {
     setAuthMode(null);
     setAuthError("");
     setAuthSuccess("");
+    resetPasswordVisibility();
   };
 
   const handleAuthChange = (event) => {
@@ -435,6 +798,11 @@ function App() {
     setAuthLoading(true);
 
     try {
+      const emailError = getEmailValidationError(authForm.email);
+      if (emailError) {
+        throw new Error(emailError);
+      }
+
       if (authMode === "register") {
         if (!authForm.name.trim()) {
           throw new Error("Please enter your name.");
@@ -445,8 +813,7 @@ function App() {
         console.log("VALIDATION SUCCESS");
       }
 
-      const endpoint = authMode === "register" ? "/api/register" : "/api/login";
-      console.log("ENDPOINT", endpoint);
+      const endpoint = authMode === "register" ? buildApiUrl("/api/register") : buildApiUrl("/api/login");
       const payload = authMode === "register"
         ? {
             name: authForm.name.trim(),
@@ -458,9 +825,6 @@ function App() {
             email: authForm.email.trim(),
             password: authForm.password,
           };
-      console.log("PAYLOAD", payload);
-      console.log("BEFORE FETCH");
-
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -491,6 +855,8 @@ function App() {
         name: data.user?.name || authForm.name.trim(),
         email: data.user?.email || authForm.email.trim(),
         role: data.user?.role || "user",
+        createdAt: data.user?.createdAt || null,
+        lastLogin: data.user?.lastLogin || null,
       };
 
       setUser(userData);
@@ -498,13 +864,7 @@ function App() {
       setNotifications([]);
       localStorage.setItem("tithi-user", JSON.stringify({ ...userData, token: data.token || null }));
       setShowUserMenu(false);
-
-      if (authMode === "register") {
-        setAuthSuccess("Registration successful. You are now logged in.");
-      } else {
-        closeAuthModal();
-      }
-
+      closeAuthModal();
       fetchNotifications();
     } catch (error) {
       console.log("AUTH ERROR", error);
@@ -526,7 +886,8 @@ function App() {
   const handleProfileClick = () => {
     setShowUserMenu(false);
     setProfileViewMode("view");
-    setPasswordChangeMode(false);
+    setProfileSaveMessage({ type: "", text: "" });
+    setProfileForm({ name: user?.name || "" });
     setShowProfileView(true);
   };
 
@@ -542,16 +903,23 @@ function App() {
       setPasswordChangeMessage({ type: "error", text: "New passwords do not match." });
       return;
     }
-    
-    if (passwordForm.newPassword.length < 6) {
-      setPasswordChangeMessage({ type: "error", text: "New password must be at least 6 characters." });
+
+    const newPasswordError = getPasswordValidationError(passwordForm.newPassword);
+    if (newPasswordError) {
+      setPasswordChangeMessage({ type: "error", text: newPasswordError });
+      return;
+    }
+
+    const confirmPasswordError = getPasswordValidationError(passwordForm.confirmPassword);
+    if (confirmPasswordError) {
+      setPasswordChangeMessage({ type: "error", text: confirmPasswordError });
       return;
     }
     
     setPasswordChangeLoading(true);
     
     try {
-      const response = await fetch("/api/change-password", {
+      const response = await fetch(buildApiUrl("/api/change-password"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -562,30 +930,224 @@ function App() {
           newPassword: passwordForm.newPassword,
         }),
       });
-      
-      const data = await response.json();
-      
+
+      const data = await response.json().catch(() => ({}));
+
       if (response.ok) {
-        setPasswordChangeMessage({ type: "success", text: "Password changed successfully! You will be logged out." });
+        setPasswordChangeMessage({ type: "success", text: data.message || "Password changed successfully. Please login again." });
         setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
-        setPasswordChangeMode(false);
         setTimeout(() => {
+          closePasswordModal();
           handleLogout();
+          openAuthModal("login");
+          navigate("/login");
         }, 1400);
       } else {
-        setPasswordChangeMessage({ type: "error", text: data.error || "Failed to change password." });
+        const backendMessage = data.error || data.message || "Failed to change password.";
+        setPasswordChangeMessage({ type: "error", text: backendMessage });
       }
     } catch (error) {
-      setPasswordChangeMessage({ type: "error", text: "Error changing password. Please try again." });
+      setPasswordChangeMessage({ type: "error", text: error?.message || "Error changing password. Please try again." });
     } finally {
       setPasswordChangeLoading(false);
     }
   };
 
+  const handleClearNotifications = async () => {
+    if (!token) return;
+    setSettingsMessage({ type: "", text: "" });
+    setClearNotificationsLoading(true);
+
+    try {
+      const response = await fetch(buildApiUrl("/api/notifications/clear"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.error || data.message || "Unable to clear notifications.");
+      }
+
+      await fetchNotifications();
+      setSettingsMessage({ type: "success", text: "Notifications cleared successfully." });
+    } catch (error) {
+      setSettingsMessage({ type: "error", text: error?.message || "Unable to clear notifications." });
+    } finally {
+      setClearNotificationsLoading(false);
+    }
+  };
+
+  const handleLogoutFromAllDevices = async () => {
+    if (!token) return;
+    const confirmed = window.confirm("Are you sure you want to logout from all devices?");
+    if (!confirmed) return;
+
+    setSettingsMessage({ type: "", text: "" });
+    setLogoutAllLoading(true);
+
+    try {
+      const response = await fetch(buildApiUrl("/api/logout-all"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.error || data.message || "Unable to logout from all devices.");
+      }
+
+      handleLogout();
+      openAuthModal("login");
+      setSettingsMessage({ type: "success", text: "You have been logged out from all devices." });
+      navigate("/login");
+    } catch (error) {
+      setSettingsMessage({ type: "error", text: error?.message || "Unable to logout from all devices." });
+    } finally {
+      setLogoutAllLoading(false);
+    }
+  };
+
+  const openDeleteAccountModal = () => {
+    setDeleteAccountError("");
+    setDeleteAccountPassword("");
+    setShowDeletePassword(false);
+    setShowDeleteAccountModal(true);
+  };
+
+  const closeDeleteAccountModal = () => {
+    setShowDeleteAccountModal(false);
+    setDeleteAccountError("");
+    setDeleteAccountPassword("");
+    setShowDeletePassword(false);
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!token) return;
+    if (!deleteAccountPassword.trim()) {
+      setDeleteAccountError("Password is required.");
+      return;
+    }
+
+    setDeleteAccountError("");
+    setDeleteAccountLoading(true);
+
+    try {
+      const response = await fetch(buildApiUrl("/api/account"), {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ password: deleteAccountPassword }),
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.error || data.message || "Unable to delete account.");
+      }
+
+      closeDeleteAccountModal();
+      handleLogout();
+      openAuthModal("login");
+      setSettingsMessage({ type: "success", text: "Account deleted successfully." });
+      navigate("/login");
+    } catch (error) {
+      setDeleteAccountError(error?.message || "Unable to delete account.");
+    } finally {
+      setDeleteAccountLoading(false);
+    }
+  };
+
   const closeProfileView = () => {
     setShowProfileView(false);
-    setPasswordChangeMode(false);
+    setProfileViewMode("view");
+    setProfileSaveMessage({ type: "", text: "" });
+    resetPasswordVisibility();
     window.scrollTo(0, 0);
+  };
+
+  const openProfileModal = () => {
+    setShowUserMenu(false);
+    setProfileViewMode("view");
+    setProfileSaveMessage({ type: "", text: "" });
+    setProfileForm({ name: user?.name || "" });
+    setShowProfileView(true);
+  };
+
+  const handleProfileEdit = () => {
+    setProfileViewMode("edit");
+    setProfileForm({ name: user?.name || "" });
+    setProfileSaveMessage({ type: "", text: "" });
+  };
+
+  const handleProfileCancel = () => {
+    setProfileViewMode("view");
+    setProfileForm({ name: user?.name || "" });
+    setProfileSaveMessage({ type: "", text: "" });
+  };
+
+  const handleProfileSave = () => {
+    const trimmedName = profileForm.name.trim();
+    if (!trimmedName) {
+      setProfileSaveMessage({ type: "error", text: "Name cannot be empty." });
+      return;
+    }
+
+    const updatedUser = {
+      ...user,
+      name: trimmedName,
+    };
+
+    setUser(updatedUser);
+    localStorage.setItem("tithi-user", JSON.stringify({ ...updatedUser, token }));
+    setProfileSaveMessage({ type: "success", text: "Profile updated successfully." });
+    setProfileViewMode("view");
+  };
+
+  const openPasswordModal = () => {
+    resetPasswordVisibility();
+    setShowUserMenu(false);
+    setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    setPasswordChangeMessage({ type: "", text: "" });
+    setShowPasswordModal(true);
+  };
+
+  const closePasswordModal = () => {
+    setShowPasswordModal(false);
+    setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    setPasswordChangeMessage({ type: "", text: "" });
+    setPasswordChangeLoading(false);
+    resetPasswordVisibility();
+  };
+
+  const openSettingsModal = () => {
+    setShowSettingsModal(true);
+    setShowUserMenu(false);
+    setSettingsMessage({ type: "", text: "" });
+  };
+
+  const closeSettingsModal = () => {
+    setShowSettingsModal(false);
+    setSettingsMessage({ type: "", text: "" });
+  };
+
+  const formatAccountDate = (value) => {
+    if (!value) return "";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "";
+    return parsed.toLocaleString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
   };
 
   const handleNotificationsClick = () => {
@@ -594,6 +1156,14 @@ function App() {
     if (notificationsSection) {
       notificationsSection.scrollIntoView({ behavior: "smooth" });
     }
+  };
+
+  const openAllNotifications = () => {
+    setShowAllNotifications(true);
+  };
+
+  const openAllPersonalNotifications = () => {
+    setShowAllPersonalNotifications(true);
   };
 
   const scrollToSection = (selector) => {
@@ -670,12 +1240,6 @@ function App() {
   const remainingNotifications = notifications.slice(1);
   const latestPersonalNotification = personalNotifications[0] || null;
   const remainingPersonalNotifications = personalNotifications.slice(1);
-
-  const userReminders = [
-    "Check today’s Varjyam before your next planned event.",
-    `Keep your preferred language set to ${language}.`,
-    "Review your personal notifications and subscription status.",
-  ];
 
   const personalSubscriptions = {
     status: "Active",
@@ -804,7 +1368,7 @@ function App() {
                   <button
                     type="button"
                     className="secondary-button"
-                    onClick={() => setShowAllNotifications(true)}
+                    onClick={openAllNotifications}
                   >
                     View All Notifications
                   </button>
@@ -914,231 +1478,401 @@ function App() {
           </div>
         </article>
 
-        <article className="section-card">
-          <div className="section-header">
-            <div>
-              <p className="eyebrow">Varjyam / Tithi Logs</p>
-              <h2>Latest astrology updates</h2>
-            </div>
-          </div>
-          <div className="hero-list">
-            <div className="hero-list-item admin-block">
-              <strong>Recent Tithi</strong>
-              <span>{tithi || "Unavailable"}</span>
-            </div>
-            <div className="hero-list-item admin-block">
-              <strong>Latest Varjyam</strong>
-              <span>{varjyamDetails[0] ? `${formatVarjyamTime(varjyamDetails[0].start)} — ${formatVarjyamTime(varjyamDetails[0].end)}` : "No Varjyam details"}</span>
-            </div>
-          </div>
-        </article>
       </section>
     </>
   );
 
-  const renderProfileView = () => {
-    const profileTitle = passwordChangeMode
-      ? "Change Password"
-      : profileViewMode === "manage"
-      ? "Manage Account"
-      : profileViewMode === "view"
-      ? "Profile"
-      : "Update Profile";
-
-    if (profileViewMode === "manage" && !passwordChangeMode) {
-      return (
-        <section className={`profile-view-section ${profileViewMode === "manage" ? "wide" : ""}`}>
-          <div className="profile-header">
-            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-              <button type="button" className="profile-back-button" onClick={closeProfileView} aria-label="Back">←</button>
-              <h1>{profileTitle}</h1>
-            </div>
-          </div>
-
-          <div className="profile-cards-row">
-            <article className="profile-card">
-              <div className="profile-section-title">Account Information</div>
-              <div className="profile-content">
-                <div className="profile-item">
-                  <span className="profile-label">Name</span>
-                  <strong className="profile-value">{user?.name || "N/A"}</strong>
-                </div>
-                <div className="profile-item">
-                  <span className="profile-label">Email</span>
-                  <strong className="profile-value">{user?.email || "N/A"}</strong>
-                </div>
-                <div className="profile-item">
-                  <span className="profile-label">Role</span>
-                  <strong className="profile-value">{user?.role === "admin" ? "Administrator" : "User"}</strong>
-                </div>
-                <div className="profile-item">
-                  <span className="profile-label">Account Status</span>
-                  <strong className="profile-value" style={{ color: "#4CAF50" }}>Active</strong>
-                </div>
-              </div>
-            </article>
-
-            <article className="profile-card">
-              <div className="profile-section-title">Subscription Details</div>
-              <div className="profile-content">
-                <div className="profile-item">
-                  <span className="profile-label">Plan</span>
-                  <strong className="profile-value">{personalSubscriptions.plan}</strong>
-                </div>
-                <div className="profile-item">
-                  <span className="profile-label">Plan Status</span>
-                  <strong className="profile-value" style={{ color: "#4CAF50" }}>{personalSubscriptions.status}</strong>
-                </div>
-                <div className="profile-item">
-                  <span className="profile-label">Renewal Window</span>
-                  <strong className="profile-value">{personalSubscriptions.renewal}</strong>
-                </div>
-                <div className="profile-item">
-                  <span className="profile-label">Next Billing</span>
-                  <strong className="profile-value">{personalSubscriptions.nextBilling}</strong>
-                </div>
-              </div>
-            </article>
-          </div>
-        </section>
-      );
-    }
-
-    if (profileViewMode === "view" && !passwordChangeMode) {
-      return (
-        <section className="profile-view-section">
-          <div className="profile-header">
-            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-              <button type="button" className="profile-back-button" onClick={closeProfileView} aria-label="Back">←</button>
-              <h1>{profileTitle}</h1>
-            </div>
-          </div>
-          <article className="profile-card">
-            <div className="profile-section-title">Account Information</div>
-            <div className="profile-content">
-              <div className="profile-item">
-                <span className="profile-label">Name</span>
-                <strong className="profile-value">{user?.name || "N/A"}</strong>
-              </div>
-              <div className="profile-item">
-                <span className="profile-label">Email</span>
-                <strong className="profile-value">{user?.email || "N/A"}</strong>
-              </div>
-              <div className="profile-item">
-                <span className="profile-label">Role</span>
-                <strong className="profile-value">{user?.role === "admin" ? "Administrator" : "User"}</strong>
-              </div>
-              <div className="profile-item">
-                <span className="profile-label">Account Status</span>
-                <strong className="profile-value" style={{ color: "#4CAF50" }}>Active</strong>
-              </div>
-            </div>
-          </article>
-        </section>
-      );
-    }
-
-    if (!passwordChangeMode) {
-      return (
-        <section className="profile-view-section">
-          <div className="profile-header">
-            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-              <button type="button" className="profile-back-button" onClick={closeProfileView} aria-label="Back">←</button>
-              <h1>{profileTitle}</h1>
-            </div>
-          </div>
-          <article className="profile-card">
-            <div className="profile-section-title">Account Information</div>
-            <div className="profile-content">
-              <div className="profile-item">
-                <span className="profile-label">Name</span>
-                <strong className="profile-value">{user?.name || "N/A"}</strong>
-              </div>
-              <div className="profile-item">
-                <span className="profile-label">Email</span>
-                <strong className="profile-value">{user?.email || "N/A"}</strong>
-              </div>
-            </div>
-          </article>
-          <div className="profile-actions">
-            <button type="button" className="primary-button" onClick={() => setPasswordChangeMode(true)}>Change Password</button>
-            <button type="button" className="secondary-button" onClick={closeProfileView}>Close</button>
-          </div>
-        </section>
-      );
-    }
+  const renderProfileModal = () => {
+    const profileTitle = profileViewMode === "edit" ? "Edit Profile" : "Profile";
+    const createdAt = formatAccountDate(user?.createdAt);
+    const lastLogin = formatAccountDate(user?.lastLogin);
 
     return (
-      <section className="profile-view-section">
-        <div className="profile-header">
-          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-            <button type="button" className="profile-back-button" onClick={closeProfileView} aria-label="Back">←</button>
-            <h1>{profileTitle}</h1>
+      <div className="modal-backdrop profile-modal-backdrop" onClick={closeProfileView}>
+        <div className="modal-card profile-modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <h3>{profileTitle}</h3>
+            <button type="button" className="modal-close" onClick={closeProfileView} aria-label="Close profile modal">×</button>
           </div>
-        </div>
-        <article className="profile-card">
-          <form className="password-change-form">
-            {passwordChangeMessage.text && (
-              <div className={`password-message password-${passwordChangeMessage.type}`}>
-                {passwordChangeMessage.text}
+
+          {profileSaveMessage.text && (
+            <div className={`password-message password-${profileSaveMessage.type}`}>
+              {profileSaveMessage.text}
+            </div>
+          )}
+
+          <div className="profile-content profile-modal-content">
+            <div className="form-group">
+              <label>Name</label>
+              {profileViewMode === "edit" ? (
+                <input
+                  type="text"
+                  value={profileForm.name}
+                  onChange={(event) => setProfileForm({ name: event.target.value })}
+                  placeholder="Enter your name"
+                />
+              ) : (
+                <strong className="profile-value">{user?.name || "--"}</strong>
+              )}
+            </div>
+            <div className="form-group">
+              <label>Email</label>
+              <strong className="profile-value">{user?.email || "--"}</strong>
+            </div>
+            <div className="form-group">
+              <label>Role</label>
+              <strong className="profile-value">{user?.role === "admin" ? "Administrator" : "User"}</strong>
+            </div>
+            {createdAt && (
+              <div className="form-group">
+                <label>Account Created Date</label>
+                <strong className="profile-value">{createdAt}</strong>
               </div>
             )}
             <div className="form-group">
+              <label>Last Login</label>
+              <strong className="profile-value">{lastLogin}</strong>
+            </div>
+          </div>
+
+          <div className="profile-actions profile-modal-actions">
+            {profileViewMode === "edit" ? (
+              <>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={handleProfileSave}
+                >
+                  Save Changes
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={handleProfileCancel}
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" className="primary-button" onClick={handleProfileEdit}>
+                  Edit Profile
+                </button>
+                <button type="button" className="secondary-button" onClick={closeProfileView}>
+                  Close
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPasswordModal = () => {
+    return (
+      <div className="modal-backdrop profile-modal-backdrop" onClick={closePasswordModal}>
+        <div className="modal-card profile-modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <h3>Change Password</h3>
+            <button type="button" className="modal-close" onClick={closePasswordModal} aria-label="Close password modal">×</button>
+          </div>
+
+              {passwordChangeMessage.text && (
+            <div className={`password-message password-${passwordChangeMessage.type}`}>
+              {passwordChangeMessage.text}
+            </div>
+          )}
+
+          <form className="password-change-form">
+            <div className="form-group">
               <label>Current Password</label>
-              <input
-                type="password"
-                value={passwordForm.currentPassword}
-                onChange={(e) => setPasswordForm({ ...passwordForm, currentPassword: e.target.value })}
-                placeholder="Enter your current password"
-                disabled={passwordChangeLoading}
-              />
+              <div className="password-field">
+                <input
+                  type={showCurrentPassword ? "text" : "password"}
+                  value={passwordForm.currentPassword}
+                  onChange={(event) => setPasswordForm((prev) => ({ ...prev, currentPassword: event.target.value }))}
+                  placeholder="Enter your current password"
+                  disabled={passwordChangeLoading}
+                />
+                <button
+                  type="button"
+                  className="password-toggle"
+                  onClick={toggleShowCurrentPassword}
+                  aria-label={showCurrentPassword ? "Hide password" : "Show password"}
+                >
+                  {showCurrentPassword ? (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a21.9 21.9 0 0 1 5.06-6.06" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      <path d="M1 1l22 22" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                      <circle cx="12" cy="12" r="3" strokeWidth="1.2" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
             <div className="form-group">
               <label>New Password</label>
-              <input
-                type="password"
-                value={passwordForm.newPassword}
-                onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })}
-                placeholder="Enter your new password"
-                disabled={passwordChangeLoading}
-              />
+              <div className="password-field">
+                <input
+                  type={showNewPassword ? "text" : "password"}
+                  value={passwordForm.newPassword}
+                  onChange={(event) => setPasswordForm((prev) => ({ ...prev, newPassword: event.target.value }))}
+                  placeholder="Enter your new password"
+                  disabled={passwordChangeLoading}
+                />
+                <button
+                  type="button"
+                  className="password-toggle"
+                  onClick={toggleShowNewPassword}
+                  aria-label={showNewPassword ? "Hide password" : "Show password"}
+                >
+                  {showNewPassword ? (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a21.9 21.9 0 0 1 5.06-6.06" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      <path d="M1 1l22 22" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                      <circle cx="12" cy="12" r="3" strokeWidth="1.2" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+              <div className="password-note">
+                Use 6–30 characters; letters, numbers, and special characters are allowed.
+              </div>
             </div>
             <div className="form-group">
-              <label>Confirm New Password</label>
-              <input
-                type="password"
-                value={passwordForm.confirmPassword}
-                onChange={(e) => setPasswordForm({ ...passwordForm, confirmPassword: e.target.value })}
-                placeholder="Confirm your new password"
-                disabled={passwordChangeLoading}
-              />
+              <label>Confirm Password</label>
+              <div className="password-field">
+                <input
+                  type={showPasswordConfirm ? "text" : "password"}
+                  value={passwordForm.confirmPassword}
+                  onChange={(event) => setPasswordForm((prev) => ({ ...prev, confirmPassword: event.target.value }))}
+                  placeholder="Confirm your new password"
+                  disabled={passwordChangeLoading}
+                />
+                <button
+                  type="button"
+                  className="password-toggle"
+                  onClick={toggleShowPasswordConfirm}
+                  aria-label={showPasswordConfirm ? "Hide password" : "Show password"}
+                >
+                  {showPasswordConfirm ? (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a21.9 21.9 0 0 1 5.06-6.06" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      <path d="M1 1l22 22" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                      <circle cx="12" cy="12" r="3" strokeWidth="1.2" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
-            <div className="profile-actions">
+            <div className="profile-actions profile-modal-actions">
               <button
                 type="button"
                 className="primary-button"
                 onClick={handlePasswordChange}
                 disabled={passwordChangeLoading}
               >
-                {passwordChangeLoading ? "Updating..." : "Update Password"}
+                {passwordChangeLoading ? "Saving..." : "Save Changes"}
               </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => {
-                  setPasswordChangeMode(false);
-                  setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
-                  setPasswordChangeMessage({ type: "", text: "" });
-                  window.scrollTo(0, 0);
-                }}
-                disabled={passwordChangeLoading}
-              >
+              <button type="button" className="secondary-button" onClick={closePasswordModal} disabled={passwordChangeLoading}>
                 Cancel
               </button>
             </div>
           </form>
-        </article>
-      </section>
+        </div>
+      </div>
+    );
+  };
+
+  const renderDeleteAccountModal = () => {
+    return (
+      <div className="modal-backdrop profile-modal-backdrop" onClick={closeDeleteAccountModal}>
+        <div className="modal-card profile-modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <h3>Delete Account</h3>
+            <button type="button" className="modal-close" onClick={closeDeleteAccountModal} aria-label="Close delete account modal">
+              ×
+            </button>
+          </div>
+
+          {deleteAccountError && (
+            <div className="password-message password-error">
+              {deleteAccountError}
+            </div>
+          )}
+
+          <div className="profile-modal-content">
+            <p className="password-note" style={{ marginBottom: "16px" }}>
+              This action is permanent and cannot be undone. Please enter your password to confirm account deletion.
+            </p>
+            <div className="form-group">
+              <label>Password</label>
+              <div className="password-field">
+                <input
+                  type={showDeletePassword ? "text" : "password"}
+                  value={deleteAccountPassword}
+                  onChange={(event) => setDeleteAccountPassword(event.target.value)}
+                  placeholder="Enter your password"
+                  disabled={deleteAccountLoading}
+                />
+                <button
+                  type="button"
+                  className="password-toggle"
+                  onClick={toggleShowDeletePassword}
+                  aria-label={showDeletePassword ? "Hide password" : "Show password"}
+                >
+                  {showDeletePassword ? (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a21.9 21.9 0 0 1 5.06-6.06" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      <path d="M1 1l22 22" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                      <circle cx="12" cy="12" r="3" strokeWidth="1.2" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+            <div className="profile-modal-actions">
+              <button
+                type="button"
+                className="danger-button"
+                onClick={handleDeleteAccount}
+                disabled={deleteAccountLoading}
+              >
+                {deleteAccountLoading ? "Deleting…" : "Delete Account"}
+              </button>
+              <button type="button" className="secondary-button" onClick={closeDeleteAccountModal} disabled={deleteAccountLoading}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderSettingsModal = () => {
+    const locationEnabled = Boolean(locationCoords?.lat != null && locationCoords?.lng != null);
+
+    return (
+      <div className="modal-backdrop profile-modal-backdrop" onClick={closeSettingsModal}>
+        <div className="modal-card settings-modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <h3>Privacy & Settings</h3>
+            <button
+              type="button"
+              className="modal-close"
+              onClick={closeSettingsModal}
+              aria-label="Close settings modal"
+            >
+              ×
+            </button>
+          </div>
+
+          {settingsMessage.text && (
+            <div className={`password-message password-${settingsMessage.type}`}>
+              {settingsMessage.text}
+            </div>
+          )}
+
+          <div className="profile-modal-content settings-modal-content">
+            <div className="settings-action-row">
+              <div className="settings-action-card compact-card">
+                <strong>Clear Notifications</strong>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={handleClearNotifications}
+                  disabled={clearNotificationsLoading}
+                >
+                  {clearNotificationsLoading ? "Clearing…" : "Clear Notifications"}
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-action-row">
+              <div className="settings-action-card compact-card">
+                <strong>Logout From All Devices</strong>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={handleLogoutFromAllDevices}
+                  disabled={logoutAllLoading}
+                >
+                  {logoutAllLoading ? "Logging out…" : "Logout From All Devices"}
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-action-row">
+              <div className="settings-action-card compact-card danger-card">
+                <strong>Delete Account</strong>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={openDeleteAccountModal}
+                  disabled={deleteAccountLoading}
+                >
+                  {deleteAccountLoading ? "Deleting…" : "Delete Account"}
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-action-row location-settings-row">
+              <div className="settings-action-card compact-card">
+                <strong>Location Settings</strong>
+                {locationEnabled ? (
+                  <>
+                    <div className="location-status">Current Location: {locationLabel || "Detected location"}</div>
+                    <div className="location-settings-buttons">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={handleUpdateLocation}
+                        disabled={locationRequesting}
+                      >
+                        {locationRequesting ? "Updating…" : "Update Location"}
+                      </button>
+                      <button
+                        type="button"
+                        className="danger-button"
+                        onClick={handleDisableLocation}
+                      >
+                        Disable Location
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={handleEnableLocation}
+                    disabled={locationRequesting}
+                  >
+                    {locationRequesting ? "Requesting…" : "Enable Location"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     );
   };
 
@@ -1193,49 +1927,56 @@ function App() {
 
           <div className="header-actions">
             {user ? (
-              <>
+              <div className="user-menu-wrap">
                 {isAdmin ? (
                   <>
                     <span className="role-badge role-pill role-admin" aria-hidden="true">🛡 ADMIN</span>
                     <button type="button" className="secondary-button" onClick={() => navigate("/admin/dashboard")}>Admin Portal</button>
-                    <button type="button" className="user-badge" onClick={() => setShowUserMenu((value) => !value)}>
-                      {user.name}
-                    </button>
                   </>
-                ) : (
-                  <button type="button" className="user-badge" onClick={() => setShowUserMenu((value) => !value)} aria-label={`Open user menu for ${user.name}`}>
-                    {user.name}
-                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="user-badge"
+                  onClick={() => setShowUserMenu((value) => !value)}
+                  aria-label={`Open user menu for ${user.name}`}
+                >
+                  {user.name}
+                </button>
+                {showUserMenu && (
+                  <div className="user-menu-dropdown">
+                    <button type="button" className="user-menu-item" onClick={handleProfileClick}>
+                      Profile
+                    </button>
+                    <button type="button" className="user-menu-item" onClick={openPasswordModal}>
+                      Change Password
+                    </button>
+                    <button type="button" className="user-menu-item" onClick={openSettingsModal}>
+                      Privacy & Settings
+                    </button>
+                    <button type="button" className="user-menu-item" onClick={handleLogout}>
+                      Logout
+                    </button>
+                  </div>
                 )}
-              </>
+              </div>
             ) : (
               <div className="auth-actions">
                 <button type="button" className="secondary-button" onClick={() => openAuthModal("login")}>Login</button>
                 <button type="button" className="primary-button" onClick={() => openAuthModal("register")}>Register</button>
               </div>
             )}
-            {user && showUserMenu && (
-              <div className="user-menu-dropdown">
-                <button type="button" className="user-menu-item" onClick={handleProfileClick}>
-                  View Profile
-                </button>
-                <button type="button" className="user-menu-item" onClick={handleLogout}>
-                  Logout
-                </button>
-              </div>
-            )}
           </div>
         </header>
 
-        {showProfileView ? renderProfileView() : isAdminPortal && isAdmin ? renderAdminPortal() : user ? (
+        {isAdminPortal && isAdmin ? renderAdminPortal() : user ? (
           <section className="top-varjyam-area">
-            <article className="section-card varjyam-card">
+            <article className="section-card astrology-card">
               <div className="section-header">
                 <div>
                   <p className="eyebrow">Astrology</p>
                   <h2>Varjyam & Tithi details</h2>
                 </div>
-                <div style={{ display: "flex", gap: "8px" }}>
+                <div className="astrology-actions">
                   <button
                     type="button"
                     className="secondary-button"
@@ -1260,24 +2001,37 @@ function App() {
                 </div>
               )}
 
-              <div className="hero-list">
-                <div className="hero-list-item">
-                  <div>
-                    <strong>Today's Tithi</strong>
-                    <p>{tithi || "Unavailable"}</p>
-                    <div style={{ display: "flex", gap: "150px", alignItems: "center" }}>
-                      <span>
-                        {getTithiTimeLabel("start", language)} {tithiStartTime ? formatVarjyamTime(tithiStartTime, language) : "—"}
-                        {tithiStartTime && isEarlierIstDate(tithiStartTime, date) ? " (started earlier)" : ""}
-                      </span>
-                      <span>{getTithiTimeLabel("end", language)} {tithiEndTime ? formatVarjyamTime(tithiEndTime, language) : "—"}</span>
-                    </div>
+              <div className="astrology-cards">
+                <article className="small-card tithi-card">
+                  <strong>Today's Tithi</strong>
+                  <p className="tithi-name">{tithi || "Unavailable"}</p>
+                  <div className="tithi-time-row">
+                    <span className="tithi-time-label">{getTithiTimeLabel("start", language)}</span>
+                    <strong className="tithi-time-value">{tithiStartTime ? formatVarjyamTime(tithiStartTime, language) : "—"}</strong>
                   </div>
-                </div>
-                <div className="hero-list-item">
+                  <div className="tithi-time-row">
+                    <span className="tithi-time-label">{getTithiTimeLabel("end", language)}</span>
+                    <strong className="tithi-time-value">{tithiEndTime ? formatVarjyamTime(tithiEndTime, language) : "—"}</strong>
+                  </div>
+                </article>
+
+                <article className="small-card varjyam-summary-card">
                   <strong>Latest Varjyam</strong>
-                  <span>{varjyamDetails[0] ? `${formatVarjyamTime(varjyamDetails[0].start)} — ${formatVarjyamTime(varjyamDetails[0].end)}` : "No Varjyam details"}</span>
-                </div>
+                  {varjyamDetails[0] ? (
+                    <div className="varjyam-time-group">
+                      <div className="varjyam-time-row">
+                        <span className="varjyam-label">Start Time</span>
+                        <strong className="varjyam-value">{formatVarjyamTime(varjyamDetails[0].start)}</strong>
+                      </div>
+                      <div className="varjyam-time-row">
+                        <span className="varjyam-label">End Time</span>
+                        <strong className="varjyam-value">{formatVarjyamTime(varjyamDetails[0].end)}</strong>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="empty-state">No Varjyam details</p>
+                  )}
+                </article>
               </div>
             </article>
 
@@ -1285,22 +2039,12 @@ function App() {
               <div className="section-header">
                 <div>
                   <p className="eyebrow">Personal dashboard</p>
-                  <h2>Notifications & reminders</h2>
+                  <h2>Personal Notifications</h2>
                 </div>
                 <button type="button" className="secondary-button" onClick={() => scrollToSection(".personal-notifications-card")}>View All</button>
               </div>
 
-              <div className="reminder-panel">
-                <h3 className="reminder-heading">Today's reminders</h3>
-                <ul className="reminder-list">
-                  {userReminders.map((line) => (
-                    <li key={line} className="reminder-item">{line}</li>
-                  ))}
-                </ul>
-              </div>
-
               <div className="notification-panel personal-notifications-panel">
-                <h3 className="section-subtitle">Personal Notifications</h3>
                 {personalNotifications.length === 0 ? (
                   <p className="empty-state">No personal notifications at the moment.</p>
                 ) : (
@@ -1318,7 +2062,7 @@ function App() {
                       <button
                         type="button"
                         className="secondary-button"
-                        onClick={() => setShowAllPersonalNotifications(true)}
+                        onClick={openAllPersonalNotifications}
                       >
                         View All Personal Notifications
                       </button>
@@ -1340,71 +2084,7 @@ function App() {
                 )}
               </div>
             </article>
-
-            <article className="section-card varjyam-card">
-              <div className="section-header">
-                <div>
-                  <p className="eyebrow">Astrology</p>
-                  <h2>Varjyam & Tithi details</h2>
-                </div>
-                <div style={{ display: "flex", gap: "8px" }}>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={handleRefresh}
-                    disabled={refreshing || varjyamNotificationLoading}
-                  >
-                    {refreshing || varjyamNotificationLoading ? "Refreshing..." : "Refresh"}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => setShowVarjyamModal(true)}
-                  >
-                    View details
-                  </button>
-                </div>
-              </div>
-
-              {varjyamNotificationError && (
-                <div className="error-state">
-                  {varjyamNotificationError}
-                </div>
-              )}
-
-              <div className="hero-list">
-                <div className="hero-list-item">
-                  <div>
-                    <strong>Today’s Tithi</strong>
-                    <p>{tithi || "Unavailable"}</p>
-                    {tithiStartTime && tithiEndTime && (
-                      <>
-                        <p>Start: {formatVarjyamTime(tithiStartTime, language)}</p>
-                        <p>End: {formatVarjyamTime(tithiEndTime, language)}</p>
-                      </>
-                    )}
-                  </div>
-                </div>
-                <div className="hero-list-item">
-                  <strong>Latest Varjyam</strong>
-                  <span>{varjyamDetails[0] ? `${formatVarjyamTime(varjyamDetails[0].start)} — ${formatVarjyamTime(varjyamDetails[0].end)}` : "No Varjyam details"}</span>
-                </div>
-              </div>
-
-              <div className="varjyam-update-section">
-                <h3 className="section-subtitle">Latest Varjyam Update</h3>
-                {varjyamNotification && varjyamNotification.message ? (
-                  <div className="notification-panel varjyam-notification-panel">
-                    <p>{varjyamNotification.message}</p>
-                  </div>
-                ) : (
-                  <div className="notification-panel empty-state">
-                    No latest Varjyam update available.
-                  </div>
-                )}
-              </div>
-            </article>
-            </section>
+          </section>
         ) : (
           <section className="guest-panel">
             <div className="section-card guest-card">
@@ -1518,6 +2198,33 @@ function App() {
                 {authLoading ? "Please wait..." : authMode === "login" ? "Login" : "Register"}
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showProfileView && renderProfileModal()}
+      {showPasswordModal && renderPasswordModal()}
+      {showDeleteAccountModal && renderDeleteAccountModal()}
+      {showSettingsModal && renderSettingsModal()}
+
+      {showLocationPrompt && (
+        <div className="modal-backdrop profile-modal-backdrop" onClick={handleSkipLocationSetup}>
+          <div className="modal-card settings-modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Enable Location?</h3>
+              <button type="button" className="modal-close" onClick={handleSkipLocationSetup} aria-label="Close modal">×</button>
+            </div>
+            <div className="modal-body">
+              <p>Location helps provide more accurate Tithi and Varjyam calculations because timings may vary slightly between cities.</p>
+            </div>
+            <div className="profile-actions profile-modal-actions">
+              <button type="button" className="primary-button" onClick={handleAllowLocationSetup} disabled={locationRequesting}>
+                {locationRequesting ? "Requesting…" : "Allow Location"}
+              </button>
+              <button type="button" className="secondary-button" onClick={handleSkipLocationSetup} disabled={locationRequesting}>
+                Skip For Now
+              </button>
+            </div>
           </div>
         </div>
       )}

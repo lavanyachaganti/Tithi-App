@@ -9,9 +9,13 @@ const generateToken = (user) => {
     throw new Error("Missing JWT_SECRET in environment variables.");
   }
 
-  return jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-    expiresIn: "7d",
-  });
+  return jwt.sign(
+    { id: user._id, tokenVersion: user.tokenVersion || 0 }, 
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "7d",
+    }
+  );
 };
 
 const buildNotificationResponse = (notifications) => {
@@ -180,6 +184,46 @@ exports.login = async (req, res) => {
   }
 };
 
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: "Current password and new password are required." });
+    }
+
+    const passwordRegex = /^[A-Za-z0-9@#$%^&*()!?_\-+=\[\]{};:'",.<>\/\\|~]{6,30}$/;
+
+    if (!passwordRegex.test(newPassword)) {
+      return res.status(400).json({
+        error: "Password must be 6 to 30 characters long and may include letters, numbers, and special characters.",
+      });
+    }
+
+    const storedUser = await User.findById(req.user._id);
+    if (!storedUser) {
+      return res.status(401).json({ error: "User not found." });
+    }
+
+    const passwordMatch = await bcrypt.compare(currentPassword, storedUser.password);
+    if (!passwordMatch) {
+      return res.status(400).json({ error: "Current password is incorrect." });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    storedUser.password = hashedPassword;
+    await storedUser.save();
+
+    res.json({
+      success: true,
+      message: "Password changed successfully. Please login again.",
+    });
+  } catch (error) {
+    console.error("Change password error:", error?.stack || error);
+    res.status(500).json({ error: "Unable to change password. Please try again." });
+  }
+};
+
 exports.getNotifications = async (req, res) => {
   try {
     const role = req.user.role || "user";
@@ -208,6 +252,55 @@ exports.getCurrentUser = async (req, res) => {
   } catch (error) {
     console.error("Get current user error:", error.message);
     res.status(500).json({ error: "Unable to fetch current user." });
+  }
+};
+
+exports.clearNotifications = async (req, res) => {
+  try {
+    await Notification.deleteMany({ user: req.user._id, type: "user" });
+    res.json({ success: true, message: "Notifications cleared successfully." });
+  } catch (error) {
+    console.error("Clear notifications error:", error.message || error);
+    res.status(500).json({ error: "Unable to clear notifications." });
+  }
+};
+
+exports.logoutAllDevices = async (req, res) => {
+  try {
+    req.user.tokenVersion = (req.user.tokenVersion || 0) + 1;
+    await req.user.save();
+
+    res.json({ success: true, message: "You have been logged out from all devices." });
+  } catch (error) {
+    console.error("Logout all devices error:", error.message || error);
+    res.status(500).json({ error: "Unable to logout from all devices." });
+  }
+};
+
+exports.deleteAccount = async (req, res) => {
+  try {
+    const { password } = req.body || {};
+
+    if (!password) {
+      return res.status(400).json({ error: "Password is required to delete the account." });
+    }
+
+    const storedUser = await User.findById(req.user._id);
+    if (!storedUser) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const passwordMatch = await bcrypt.compare(password, storedUser.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: "Incorrect password." });
+    }
+
+    await Notification.deleteMany({ user: req.user._id });
+    await User.deleteOne({ _id: req.user._id });
+    res.json({ success: true, message: "Account deleted successfully." });
+  } catch (error) {
+    console.error("Delete account error:", error.message || error);
+    res.status(500).json({ error: "Unable to delete account." });
   }
 };
 

@@ -18,6 +18,11 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ error: "Invalid authentication token." });
     }
 
+    const tokenVersion = typeof decoded.tokenVersion === "number" ? decoded.tokenVersion : 0;
+    if ((user.tokenVersion || 0) !== tokenVersion) {
+      return res.status(401).json({ error: "Invalid or expired authentication token." });
+    }
+
     req.user = user;
     next();
   } catch (error) {

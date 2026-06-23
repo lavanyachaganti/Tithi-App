@@ -24,6 +24,10 @@ const userSchema = new mongoose.Schema(
       default: "user",
       trim: true,
     },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
     lastLogin: {
       type: Date,
       default: null,

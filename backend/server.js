@@ -57,6 +57,37 @@ const parseRequestedDateTime = (requestedDate, requestedTime) => {
   return new Date(`${normalizedDate}T${normalizedTime}:00+05:30`);
 };
 
+const MIN_VARJYAM_MINUTES = 10;
+const calculateVarjyamDurationMinutes = (start, end) => {
+  if (!start || !end) return 0;
+  const startTime = new Date(start);
+  const endTime = new Date(end);
+  if (Number.isNaN(startTime.getTime()) || Number.isNaN(endTime.getTime()) || endTime <= startTime) {
+    return 0;
+  }
+  return (endTime.getTime() - startTime.getTime()) / 60000;
+};
+
+const normalizeVarjyamPeriods = (periods = [], source = "unknown") => {
+  if (!Array.isArray(periods)) {
+    console.log(`[Varjyam][${source}] No periods to normalize`);
+    return [];
+  }
+
+  return periods.reduce((acc, period) => {
+    const durationMinutes = calculateVarjyamDurationMinutes(period.start, period.end);
+    console.log(`[Varjyam][${source}] start=${period.start} end=${period.end} duration=${durationMinutes.toFixed(2)} minutes`);
+
+    if (durationMinutes < MIN_VARJYAM_MINUTES) {
+      console.log(`[Varjyam][${source}] Skipping invalid Varjyam period because duration < ${MIN_VARJYAM_MINUTES} minutes`);
+      return acc;
+    }
+
+    acc.push({ ...period, durationMinutes });
+    return acc;
+  }, []);
+};
+
 const defaultOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
 const allowedOrigins = (process.env.CORS_ORIGIN || defaultOrigins.join(","))
   .split(",")
@@ -199,7 +230,8 @@ const fetchAndCachePanchangForDate = async (queryDate) => {
   }
 
   try {
-    varjyam = await fetchVarjyamFromProkerala(queryDate);
+    const rawVarjyam = await fetchVarjyamFromProkerala(queryDate);
+    varjyam = normalizeVarjyamPeriods(rawVarjyam, "Prokerala");
   } catch (error) {
     debugLog(`[/api/refresh-helper] Varjyam fetch failed for ${istDate}: ${error.message}`);
     varjyam = [];
@@ -353,21 +385,20 @@ app.get(["/tithi", "/api/tithi"], async (req, res) => {
 // ============================================================================
 app.post(["/panchang/refresh", "/api/panchang/refresh"], async (req, res) => {
   try {
-    // ALWAYS use CURRENT IST TIME for refresh - ignore any date/time parameters
-    // This ensures we get the currently active Tithi at the exact refresh moment
-    const now = new Date();
-    const istDate = now.toLocaleDateString("en-CA", { timeZone: TIMEZONE_LABEL });
-    const refreshTime = formatDateTime(now);
+    const { date: requestedDate, time: requestedTime } = req.query;
+    const queryDate = parseRequestedDateTime(requestedDate, requestedTime);
+    const istDate = queryDate.toLocaleDateString("en-CA", { timeZone: TIMEZONE_LABEL });
+    const refreshTime = formatDateTime(queryDate);
 
-    debugLog(`[/api/panchang/refresh] Refresh requested at IST: ${refreshTime}`);
+    debugLog(`[/api/panchang/refresh] Refresh requested for ${refreshTime} requestedDate=${requestedDate} requestedTime=${requestedTime}`);
 
     // ALWAYS fetch fresh data from Prokerala (don't use cache for refresh)
     let tithi = null;
     let varjyam = [];
 
     try {
-      debugLog(`[/api/panchang/refresh] Fetching FRESH Tithi from Prokerala at current time (${refreshTime})...`);
-      tithi = await fetchTithiFromProkerala(now);
+      debugLog(`[/api/panchang/refresh] Fetching FRESH Tithi from Prokerala at requested time (${refreshTime})...`);
+      tithi = await fetchTithiFromProkerala(queryDate);
       debugLog(`[/api/panchang/refresh] Tithi fetched: ${tithi.name} (${tithi.paksha})`);
     } catch (error) {
       debugLog(`[/api/panchang/refresh] Tithi fetch failed: ${error.message}`);
@@ -378,9 +409,11 @@ app.post(["/panchang/refresh", "/api/panchang/refresh"], async (req, res) => {
     }
 
     try {
-      debugLog(`[/api/panchang/refresh] Fetching Varjyam from Prokerala at current time...`);
-      varjyam = await fetchVarjyamFromProkerala(now);
-      debugLog(`[/api/panchang/refresh] Varjyam fetched: ${varjyam.length} periods`);
+      debugLog(`[/api/panchang/refresh] Fetching Varjyam from Prokerala at requested time...`);
+      const rawVarjyam = await fetchVarjyamFromProkerala(queryDate);
+      debugLog(`[/api/panchang/refresh] Varjyam fetched: ${rawVarjyam.length} periods`);
+      varjyam = normalizeVarjyamPeriods(rawVarjyam, "Prokerala");
+      debugLog(`[/api/panchang/refresh] Varjyam after filtering: ${varjyam.length} valid periods`);
     } catch (error) {
       debugLog(`[/api/panchang/refresh] Varjyam fetch failed: ${error.message}`);
       // Don't fail the entire request if Varjyam fails
@@ -447,32 +480,65 @@ const getStoredVarjyamNotification = async (queryDate) => {
 
 app.get(["/varjyam/notification", "/api/varjyam/notification"], async (req, res) => {
   try {
-    const { date: requestedDate } = req.query;
-    const queryDate = parseRequestedDateTime(requestedDate, "12:00");
+    const { date: requestedDate, time: requestedTime } = req.query;
+    const queryDate = parseRequestedDateTime(requestedDate, requestedTime);
     const istDate = queryDate.toLocaleDateString("en-CA", { timeZone: TIMEZONE_LABEL });
 
-    debugLog(`[/api/varjyam/notification] Reading cache for ${istDate} requestedDate=${requestedDate}`);
+    debugLog(`[/api/varjyam/notification] Reading cache for ${istDate} requestedDate=${requestedDate} requestedTime=${requestedTime}`);
 
-    // Read from MongoDB cache only - NEVER call Prokerala here
-    const cache = await PanchangCache.findOne({ date: istDate });
+    let cache = await PanchangCache.findOne({ date: istDate });
 
-    if (!cache) {
-      debugLog(`[/api/varjyam/notification] No cache found for ${istDate}`);
-      return res.status(404).json({
-        success: false,
-        needsRefresh: true,
-        message: "Varjyam data not cached. Please click refresh button.",
+    if (cache) {
+      debugLog(`[/api/varjyam/notification] Cache found, source: ${cache.source}`);
+      const cachedVarjyam = normalizeVarjyamPeriods(cache.varjyam || [], cache.source || "cache");
+      return res.json({
+        success: true,
+        source: cache.source,
         date: istDate,
+        varjyam: cachedVarjyam,
+        coordinates: "17.3850,78.4867",
       });
     }
 
-    debugLog(`[/api/varjyam/notification] Cache found, source: ${cache.source}`);
+    debugLog(`[/api/varjyam/notification] No cache found for ${istDate}, fetching Prokerala data now`);
+
+    try {
+      cache = await fetchAndCachePanchangForDate(queryDate);
+      if (cache && Array.isArray(cache.varjyam) && cache.varjyam.length > 0) {
+        const fetchedVarjyam = normalizeVarjyamPeriods(cache.varjyam, cache.source || "Prokerala");
+        debugLog(`[/api/varjyam/notification] Auto-fetched Prokerala Varjyam count=${fetchedVarjyam.length}`);
+        return res.json({
+          success: true,
+          source: cache.source || "prokerala-live",
+          date: istDate,
+          varjyam: fetchedVarjyam,
+          coordinates: "17.3850,78.4867",
+        });
+      }
+    } catch (error) {
+      debugLog(`[/api/varjyam/notification] Auto-fetch from Prokerala failed: ${error.message}`);
+    }
+
+    debugLog(`[/api/varjyam/notification] Falling back to local panchang-ts Varjyam for ${istDate}`);
+    const panchang = getPanchangData(queryDate, requestedTime || "12:00");
+
+    if (!panchang) {
+      debugLog(`[/api/varjyam/notification] Local fallback failed for ${istDate}`);
+      return res.status(500).json({
+        success: false,
+        error: "Unable to compute Varjyam data",
+      });
+    }
+
+    const rawLocalVarjyam = Array.isArray(panchang.varjyamDetails) ? panchang.varjyamDetails : [];
+    const localVarjyam = normalizeVarjyamPeriods(rawLocalVarjyam, "panchang-ts");
+    debugLog(`[/api/varjyam/notification] Computed local Varjyam count=${localVarjyam.length}`);
 
     res.json({
       success: true,
-      source: cache.source,
+      source: "panchang-ts-fallback",
       date: istDate,
-      varjyam: cache.varjyam || [],
+      varjyam: localVarjyam,
       coordinates: "17.3850,78.4867",
     });
   } catch (error) {

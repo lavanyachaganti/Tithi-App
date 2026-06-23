@@ -162,11 +162,23 @@ const getTithiData = (queryDate, queryTime) => {
       return null;
     }
 
+    const parseTimeValue = (value) => {
+      if (!value) return null;
+      if (value instanceof Date) return value;
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    };
+
     // Find the tithi that includes the query time
     let currentTithi = null;
     for (const tithi of daily.tithis) {
-      // Check if query time falls within this tithi
-      if (tithi.endTime && queryDateTime < tithi.endTime) {
+      const tithiEnd = parseTimeValue(tithi.endTime || tithi.end);
+      const tithiStart = parseTimeValue(tithi.startTime || tithi.start);
+      if (!tithiEnd) {
+        continue;
+      }
+
+      if (queryDateTime >= (tithiStart || new Date(-8640000000000000)) && queryDateTime < tithiEnd) {
         currentTithi = tithi;
         break;
       }
