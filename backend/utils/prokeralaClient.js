@@ -7,7 +7,12 @@ const debugLogFile = path.join(__dirname, "..", "debug.log");
 const debugLog = (message) => {
   const timestamp = new Date().toISOString();
   const logLine = `[${timestamp}] ${message}\n`;
-  fs.appendFileSync(debugLogFile, logLine);
+  try {
+    fs.appendFileSync(debugLogFile, logLine);
+  } catch (error) {
+    // Avoid breaking API flows if the debug log file is briefly locked on Windows
+    console.warn(`[debugLog] ${error.message}`);
+  }
   console.log(logLine);
 };
 

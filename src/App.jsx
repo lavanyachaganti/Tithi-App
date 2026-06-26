@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
 function getCurrentDateTime() {
@@ -158,6 +158,7 @@ function App() {
   const [deletingUser, setDeletingUser] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const lastLoadKeyRef = useRef("");
   const [subscriberCount, setSubscriberCount] = useState(0);
   const [skipAutoFetch] = useState(false);
   const [notifications, setNotifications] = useState([]);
@@ -542,7 +543,6 @@ function App() {
       setTithi("Tithi unavailable");
       setTithiStartTime("");
       setTithiEndTime("");
-      setVarjyamDetails([]);
     } finally {
       setLoading(false);
     }
@@ -647,6 +647,46 @@ function App() {
     }
   }, [token, fetchCurrentUser]);
 
+  const fetchInitialVarjyam = useCallback(async () => {
+    if (!date || !time) return;
+
+    setVarjyamNotificationLoading(true);
+    setVarjyamNotificationError("");
+
+    let refreshUrl = `/api/panchang/refresh?date=${encodeURIComponent(date)}&time=${encodeURIComponent(time)}`;
+    if (locationCoords?.lat != null && locationCoords?.lng != null) {
+      refreshUrl += `&lat=${encodeURIComponent(locationCoords.lat)}&lng=${encodeURIComponent(locationCoords.lng)}`;
+    }
+    console.debug("fetchInitialVarjyam start", { selectedDate: date, selectedTime: time, refreshUrl, locationCoords });
+
+    try {
+      const response = await fetch(refreshUrl, { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      console.debug("fetchInitialVarjyam response", { selectedDate: date, selectedTime: time, data });
+
+      if (!response.ok) {
+        console.error("Initial Varjyam fetch error:", response.status, data.error);
+        setVarjyamDetails([]);
+        setVarjyamNotificationError(data.message || "Varjyam unavailable");
+        return;
+      }
+
+      if (Array.isArray(data.varjyam) && data.varjyam.length > 0) {
+        setVarjyamDetails(data.varjyam);
+        console.debug("fetchInitialVarjyam setVarjyamDetails", { newDetails: data.varjyam });
+        setVarjyamNotificationError("");
+      } else {
+        setVarjyamDetails([]);
+      }
+    } catch (error) {
+      console.error("Initial Varjyam fetch error:", error?.message);
+      setVarjyamDetails([]);
+      setVarjyamNotificationError("Varjyam unavailable");
+    } finally {
+      setVarjyamNotificationLoading(false);
+    }
+  }, [date, time, locationCoords]);
+
   const fetchVarjyamNotification = useCallback(async () => {
     if (!date || !time) return;
 
@@ -691,16 +731,21 @@ function App() {
     }
   }, [date, time, locationCoords]);
 
-  useEffect(() => {
-    if (skipAutoFetch) return;
-    if (!date || !time) return;
-    fetchTithi();
-  }, [fetchTithi, date, time]);
+  const loadDashboardData = useCallback(async () => {
+    if (skipAutoFetch || !date || !time) return;
+
+    await Promise.all([fetchTithi(), fetchVarjyamNotification()]);
+  }, [date, time, fetchTithi, fetchVarjyamNotification, skipAutoFetch]);
 
   useEffect(() => {
-    if (skipAutoFetch) return;
-    fetchVarjyamNotification();
-  }, [fetchVarjyamNotification]);
+    const loadKey = `${date}|${time}|${language}|${locationCoords?.lat ?? ""}|${locationCoords?.lng ?? ""}`;
+
+    if (lastLoadKeyRef.current === loadKey) return;
+    lastLoadKeyRef.current = loadKey;
+
+    if (skipAutoFetch || !date || !time) return;
+    loadDashboardData();
+  }, [date, time, language, locationCoords?.lat, locationCoords?.lng, loadDashboardData, skipAutoFetch]);
 
   useEffect(() => {
     fetchNotifications();

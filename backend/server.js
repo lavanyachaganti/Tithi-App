@@ -15,7 +15,12 @@ const debugLogFile = path.join(__dirname, "debug.log");
 const debugLog = (message) => {
   const timestamp = new Date().toISOString();
   const logLine = `[${timestamp}] ${message}\n`;
-  fs.appendFileSync(debugLogFile, logLine);
+  try {
+    fs.appendFileSync(debugLogFile, logLine);
+  } catch (error) {
+    // Avoid breaking API flows if the debug log file is briefly locked on Windows
+    console.warn(`[debugLog] ${error.message}`);
+  }
   console.log(logLine);
 };
 const User = require("./models/User");
@@ -38,6 +43,7 @@ const {
   fetchVarjyamFromProkerala,
   getIstDateString: getProkeralaIstDateString,
 } = require("./utils/prokeralaClient");
+const { canUseCachedTithiForDate } = require("./utils/tithiCacheDecision");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -68,22 +74,44 @@ const calculateVarjyamDurationMinutes = (start, end) => {
   return (endTime.getTime() - startTime.getTime()) / 60000;
 };
 
+const toPlainObject = (value) => {
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (error) {
+    return { ...value };
+  }
+};
+
 const normalizeVarjyamPeriods = (periods = [], source = "unknown") => {
   if (!Array.isArray(periods)) {
     console.log(`[Varjyam][${source}] No periods to normalize`);
     return [];
   }
 
-  return periods.reduce((acc, period) => {
-    const durationMinutes = calculateVarjyamDurationMinutes(period.start, period.end);
-    console.log(`[Varjyam][${source}] start=${period.start} end=${period.end} duration=${durationMinutes.toFixed(2)} minutes`);
+  const preserveProkeralaPeriods = String(source).toLowerCase().includes("prokerala");
 
-    if (durationMinutes < MIN_VARJYAM_MINUTES) {
+  return periods.reduce((acc, period) => {
+    const plainPeriod = toPlainObject(period);
+    const start = plainPeriod?.start || period?.start || "";
+    const end = plainPeriod?.end || period?.end || "";
+    const durationMinutes = calculateVarjyamDurationMinutes(start, end);
+    console.log(`[Varjyam][${source}] start=${start} end=${end} duration=${durationMinutes.toFixed(2)} minutes`);
+
+    if (!preserveProkeralaPeriods && durationMinutes < MIN_VARJYAM_MINUTES) {
       console.log(`[Varjyam][${source}] Skipping invalid Varjyam period because duration < ${MIN_VARJYAM_MINUTES} minutes`);
       return acc;
     }
 
-    acc.push({ ...period, durationMinutes });
+    if (durationMinutes <= 0) {
+      console.log(`[Varjyam][${source}] Skipping Varjyam period because duration is not positive`);
+      return acc;
+    }
+
+    acc.push({ start, end, durationMinutes });
     return acc;
   }, []);
 };
@@ -323,12 +351,15 @@ app.get(["/tithi", "/api/tithi"], async (req, res) => {
     }
 
     if (cache && tithiData && requestedTime) {
-      const queryDateTime = queryDate;
-      const cacheStart = tithiData.start ? new Date(tithiData.start) : null;
-      const cacheEnd = tithiData.end ? new Date(tithiData.end) : null;
+      const shouldUseCache = canUseCachedTithiForDate({
+        requestedDate,
+        requestedTime,
+        cacheDate: cache?.date,
+        tithiData,
+      });
 
-      if (!cacheStart || !cacheEnd || queryDateTime < cacheStart || queryDateTime > cacheEnd) {
-        debugLog(`[/api/tithi] Requested time ${queryDateTime.toISOString()} falls outside cached tithi period, recomputing locally`);
+      if (!shouldUseCache) {
+        debugLog(`[/api/tithi] Requested time ${queryDate.toISOString()} falls outside cached tithi period for ${cache?.date || istDate}, recomputing locally`);
         tithiData = null;
       }
     }
@@ -428,7 +459,7 @@ app.post(["/panchang/refresh", "/api/panchang/refresh"], async (req, res) => {
         source: "prokerala-live",
         tithi,
         varjyam,
-        createdAt: now,
+        createdAt: new Date(),
       };
 
       // Use findOneAndUpdate to handle concurrent refresh requests gracefully
@@ -490,7 +521,11 @@ app.get(["/varjyam/notification", "/api/varjyam/notification"], async (req, res)
 
     if (cache) {
       debugLog(`[/api/varjyam/notification] Cache found, source: ${cache.source}`);
-      const cachedVarjyam = normalizeVarjyamPeriods(cache.varjyam || [], cache.source || "cache");
+      const rawCachedVarjyam = Array.isArray(cache.varjyam) ? cache.varjyam : [];
+      const cachedVarjyam = normalizeVarjyamPeriods(rawCachedVarjyam.map((period) => ({
+        start: period?.start || "",
+        end: period?.end || "",
+      })), cache.source || "cache");
       return res.json({
         success: true,
         source: cache.source,
@@ -500,24 +535,7 @@ app.get(["/varjyam/notification", "/api/varjyam/notification"], async (req, res)
       });
     }
 
-    debugLog(`[/api/varjyam/notification] No cache found for ${istDate}, fetching Prokerala data now`);
-
-    try {
-      cache = await fetchAndCachePanchangForDate(queryDate);
-      if (cache && Array.isArray(cache.varjyam) && cache.varjyam.length > 0) {
-        const fetchedVarjyam = normalizeVarjyamPeriods(cache.varjyam, cache.source || "Prokerala");
-        debugLog(`[/api/varjyam/notification] Auto-fetched Prokerala Varjyam count=${fetchedVarjyam.length}`);
-        return res.json({
-          success: true,
-          source: cache.source || "prokerala-live",
-          date: istDate,
-          varjyam: fetchedVarjyam,
-          coordinates: "17.3850,78.4867",
-        });
-      }
-    } catch (error) {
-      debugLog(`[/api/varjyam/notification] Auto-fetch from Prokerala failed: ${error.message}`);
-    }
+    debugLog(`[/api/varjyam/notification] No cache found for ${istDate}; using local panchang-ts fallback without calling Prokerala`);
 
     debugLog(`[/api/varjyam/notification] Falling back to local panchang-ts Varjyam for ${istDate}`);
     const panchang = getPanchangData(queryDate, requestedTime || "12:00");
